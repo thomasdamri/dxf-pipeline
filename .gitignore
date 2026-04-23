@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+tiles/
+*.webp
+svg_manifest.json
+tile_meta.json

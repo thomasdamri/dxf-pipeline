@@ -1,0 +1,32 @@
+{
+  "_comment": "Tile rendering themes for mock_viewer.dxf. Pass to render_svg.py with --themes-config.",
+  "_layers": {
+    "FITTING":    "654 fitting symbols (valves, fittings) — the primary diagram content",
+    "TEXT-SEQ":   "654 sequential labels paired with each fitting",
+    "SYS-BORDER": "20 system boundary rectangles",
+    "SYS-DIVIDER": "51 lines dividing system columns",
+    "SYS-NAME":   "20 system name text labels"
+  },
+  "light": {
+    "_tokens": "MD3 light palette — see design-system.md",
+    "background": "#F9F9FF",
+    "layers": {
+      "FITTING":     "#3B608F",
+      "TEXT-SEQ":    "#191C20",
+      "SYS-BORDER":  "#C3C6CF",
+      "SYS-DIVIDER": "#74777F",
+      "SYS-NAME":    "#43474E"
+    }
+  },
+  "dark": {
+    "_tokens": "MD3 dark palette — see design-system.md",
+    "background": "#111318",
+    "layers": {
+      "FITTING":     "#A5C8FE",
+      "TEXT-SEQ":    "#E1E2E9",
+      "SYS-BORDER":  "#43474E",
+      "SYS-DIVIDER": "#8D9199",
+      "SYS-NAME":    "#C3C6CF"
+    }
+  }
+}
