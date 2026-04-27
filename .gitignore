@@ -12,3 +12,5 @@ tiles/
 *.webp
 svg_manifest.json
 tile_meta.json
+diagrams/*.svg
+diagrams/hitboxes.json

@@ -30,14 +30,15 @@ logger = logging.getLogger(__name__)
 # Types
 # ──────────────────────────────────────────────
 
+
 class DxfEntity(TypedDict):
-    text:   str
+    text: str
     insert: tuple[float, float]
     height: float
     halign: int | None
     valign: int | None
-    layer:  str
-    type:   str  # "TEXT" | "MTEXT"
+    layer: str
+    type: str  # "TEXT" | "MTEXT"
 
 
 class LatLng(TypedDict):
@@ -46,20 +47,21 @@ class LatLng(TypedDict):
 
 
 class HitboxBbox(TypedDict):
-    leaflet: dict[str, list[LatLng]]   # {"corners": [TL, TR, BR, BL]}
+    leaflet: dict[str, list[LatLng]]  # {"corners": [TL, TR, BR, BL]}
 
 
 class HitboxRecord(TypedDict):
-    label:     str
-    found:     bool
-    clustered: bool   # True when matched via spatial cluster
-    leaflet:   LatLng | None
-    bbox:      HitboxBbox | None
+    label: str
+    found: bool
+    clustered: bool  # True when matched via spatial cluster
+    leaflet: LatLng | None
+    bbox: HitboxBbox | None
 
 
 # ──────────────────────────────────────────────
 # 1.  DXF Extraction
 # ──────────────────────────────────────────────
+
 
 def extract_text_entities(dxf_path: str) -> list[DxfEntity]:
     """Extract all TEXT/MTEXT entities from DXF modelspace."""
@@ -78,28 +80,32 @@ def extract_text_entities(dxf_path: str) -> list[DxfEntity]:
             text = (e.dxf.text or "").strip()
             if not text:
                 continue
-            entities.append({
-                "text":   text,
-                "insert": (round(e.dxf.insert.x, 4), round(e.dxf.insert.y, 4)),
-                "height": getattr(e.dxf, "height", 2.5) or 2.5,
-                "halign": getattr(e.dxf, "halign", 0),
-                "valign": getattr(e.dxf, "valign", 0),
-                "layer":  getattr(e.dxf, "layer", "0") or "0",
-                "type":   "TEXT",
-            })
+            entities.append(
+                {
+                    "text": text,
+                    "insert": (round(e.dxf.insert.x, 4), round(e.dxf.insert.y, 4)),
+                    "height": getattr(e.dxf, "height", 2.5) or 2.5,
+                    "halign": getattr(e.dxf, "halign", 0),
+                    "valign": getattr(e.dxf, "valign", 0),
+                    "layer": getattr(e.dxf, "layer", "0") or "0",
+                    "type": "TEXT",
+                }
+            )
         elif etype == "MTEXT":
-            text = e.plain_text().strip()
+            text = e.plain_text().strip()  # type: ignore[attr-defined]
             if not text:
                 continue
-            entities.append({
-                "text":   text,
-                "insert": (round(e.dxf.insert.x, 4), round(e.dxf.insert.y, 4)),
-                "height": getattr(e.dxf, "char_height", 2.5) or 2.5,
-                "halign": None,
-                "valign": None,
-                "layer":  getattr(e.dxf, "layer", "0") or "0",
-                "type":   "MTEXT",
-            })
+            entities.append(
+                {
+                    "text": text,
+                    "insert": (round(e.dxf.insert.x, 4), round(e.dxf.insert.y, 4)),
+                    "height": getattr(e.dxf, "char_height", 2.5) or 2.5,
+                    "halign": None,
+                    "valign": None,
+                    "layer": getattr(e.dxf, "layer", "0") or "0",
+                    "type": "MTEXT",
+                }
+            )
 
     return entities
 
@@ -120,9 +126,11 @@ def get_dxf_extents(dxf_path: str) -> dict:
     x_min, y_min = bbox.extmin.x, bbox.extmin.y
     x_max, y_max = bbox.extmax.x, bbox.extmax.y
     return {
-        "x_min": x_min, "y_min": y_min,
-        "x_max": x_max, "y_max": y_max,
-        "width":  x_max - x_min,
+        "x_min": x_min,
+        "y_min": y_min,
+        "x_max": x_max,
+        "y_max": y_max,
+        "width": x_max - x_min,
         "height": y_max - y_min,
     }
 
@@ -131,17 +139,18 @@ def get_dxf_extents(dxf_path: str) -> dict:
 # 2.  Coordinate Transform
 # ──────────────────────────────────────────────
 
+
 class CoordTransform:
     """DXF (Y-up) → Leaflet CRS.Simple (lat = -y_px, lng = x_px)."""
 
     def __init__(self, dxf_extents: dict, tile_meta: dict) -> None:
-        full_w   = tile_meta["full_width_px"]
-        full_h   = tile_meta["full_height_px"]
-        tile_sz  = tile_meta["tile_size"]
+        full_w = tile_meta["full_width_px"]
+        full_h = tile_meta["full_height_px"]
+        tile_sz = tile_meta["tile_size"]
         short_px = min(full_w, full_h)
-        coord_w  = full_w * tile_sz / short_px
-        coord_h  = full_h * tile_sz / short_px
-        self._dxf     = dxf_extents
+        coord_w = full_w * tile_sz / short_px
+        coord_h = full_h * tile_sz / short_px
+        self._dxf = dxf_extents
         self._scale_x = coord_w / dxf_extents["width"]
         self._scale_y = coord_h / dxf_extents["height"]
         self._coord_h = coord_h
@@ -159,8 +168,8 @@ class CoordTransform:
 # 3.  Bounding Box
 # ──────────────────────────────────────────────
 
-_CHAR_WIDTH = 0.6   # advance width / cap-height (simple monospace estimate)
-_PAD        = 0.12  # padding as fraction of cap-height
+_CHAR_WIDTH = 0.6  # advance width / cap-height (simple monospace estimate)
+_PAD = 0.12  # padding as fraction of cap-height
 
 
 def _entity_dxf_corners(entity: DxfEntity) -> list[tuple[float, float]] | None:
@@ -170,26 +179,26 @@ def _entity_dxf_corners(entity: DxfEntity) -> list[tuple[float, float]] | None:
         return None
 
     raw_w = len(entity["text"]) * h * _CHAR_WIDTH
-    pad   = h * _PAD
+    pad = h * _PAD
     ix, iy = entity["insert"]
     halign = entity.get("halign") or 0
     valign = entity.get("valign") or 0
 
-    if halign == 1:    # Center
-        lx_min, lx_max = -raw_w / 2 - pad,  raw_w / 2 + pad
+    if halign == 1:  # Center
+        lx_min, lx_max = -raw_w / 2 - pad, raw_w / 2 + pad
     elif halign == 2:  # Right
-        lx_min, lx_max = -raw_w - pad,  pad
-    else:              # Left / Aligned / Fit / default
-        lx_min, lx_max = -pad,  raw_w + pad
+        lx_min, lx_max = -raw_w - pad, pad
+    else:  # Left / Aligned / Fit / default
+        lx_min, lx_max = -pad, raw_w + pad
 
-    if valign == 1:    # Bottom
-        ly_min, ly_max = -pad,  h + pad
+    if valign == 1:  # Bottom
+        ly_min, ly_max = -pad, h + pad
     elif valign == 2:  # Middle
-        ly_min, ly_max = -h / 2 - pad,  h / 2 + pad
+        ly_min, ly_max = -h / 2 - pad, h / 2 + pad
     elif valign == 3:  # Top
-        ly_min, ly_max = -h - pad,  pad
-    else:              # Baseline / default: descenders ≈ 20 % below insert
-        ly_min, ly_max = -h * 0.2 - pad,  h + pad
+        ly_min, ly_max = -h - pad, pad
+    else:  # Baseline / default: descenders ≈ 20 % below insert
+        ly_min, ly_max = -h * 0.2 - pad, h + pad
 
     return [
         (ix + lx_min, iy + ly_min),
@@ -221,8 +230,8 @@ def _entity_centre(entity: DxfEntity) -> tuple[float, float]:
 # 3.5  Spatial Clustering
 # ──────────────────────────────────────────────
 
-_DEFAULT_CLUSTER_GAP = 3.5   # × cap-height  (vertical)
-_DEFAULT_H_TOLERANCE = 2.5   # × cap-height  (horizontal gate)
+_DEFAULT_CLUSTER_GAP = 3.5  # × cap-height  (vertical)
+_DEFAULT_H_TOLERANCE = 2.5  # × cap-height  (horizontal gate)
 
 
 def build_clusters(
@@ -263,7 +272,7 @@ def build_clusters(
         hi = entities[i].get("height", 0.0) or 0.0
         for j in range(i + 1, n):
             hj = entities[j].get("height", 0.0) or 0.0
-            scale    = max(hi, hj, 0.001)
+            scale = max(hi, hj, 0.001)
             cx1, cy1 = centres[i]
             cx2, cy2 = centres[j]
             dy = abs(cy2 - cy1)
@@ -279,10 +288,7 @@ def build_clusters(
     for members in groups.values():
         if len(members) < 2:
             continue
-        sorted_members = sorted(
-            members,
-            key=lambda i: (-round(centres[i][1], 2), centres[i][0])
-        )
+        sorted_members = sorted(members, key=lambda i: (-round(centres[i][1], 2), centres[i][0]))
         clusters.append([entities[i] for i in sorted_members])
 
     return clusters
@@ -294,14 +300,14 @@ def _cluster_rows(cluster: list[DxfEntity]) -> tuple[list[str], list[str]] | Non
     Y values are rounded to 1dp to absorb small jitter; highest Y = top row.
     Returns (top_tokens, bottom_tokens), or None when fewer than 2 distinct rows exist.
     """
-    centres   = [_entity_centre(e) for e in cluster]
-    y_vals    = [round(cy, 1) for _, cy in centres]
+    centres = [_entity_centre(e) for e in cluster]
+    y_vals = [round(cy, 1) for _, cy in centres]
     unique_ys = sorted(set(y_vals), reverse=True)
     if len(unique_ys) < 2:
         return None
-    top_y, bot_y  = unique_ys[0], unique_ys[1]
-    top_tokens    = [e["text"].strip() for e, y in zip(cluster, y_vals) if y == top_y]
-    bottom_tokens = [e["text"].strip() for e, y in zip(cluster, y_vals) if y == bot_y]
+    top_y, bot_y = unique_ys[0], unique_ys[1]
+    top_tokens = [e["text"].strip() for e, y in zip(cluster, y_vals, strict=True) if y == top_y]
+    bottom_tokens = [e["text"].strip() for e, y in zip(cluster, y_vals, strict=True) if y == bot_y]
     return top_tokens, bottom_tokens
 
 
@@ -362,6 +368,7 @@ def build_cluster_index(
 # 4.  Matching
 # ──────────────────────────────────────────────
 
+
 def build_index(entities: list[DxfEntity]) -> dict[str, DxfEntity]:
     """Map text → first entity with that exact text (case-sensitive)."""
     idx: dict[str, DxfEntity] = {}
@@ -399,21 +406,21 @@ def _cluster_to_hitbox(
         bbox: HitboxBbox | None = {"leaflet": {"corners": transform.corners_to_leaflet(aabb)}}
     else:  # pragma: no cover — all cluster members have zero height
         leaflet = None
-        bbox    = None
+        bbox = None
 
     return {
-        "label":     label,
-        "found":     True,
+        "label": label,
+        "found": True,
         "clustered": True,
-        "leaflet":   leaflet,
-        "bbox":      bbox,
+        "leaflet": leaflet,
+        "bbox": bbox,
     }
 
 
 def build_hitboxes(
-    labels:        list[str],
-    index:         dict[str, DxfEntity],
-    transform:     CoordTransform,
+    labels: list[str],
+    index: dict[str, DxfEntity],
+    transform: CoordTransform,
     cluster_index: dict[str, list[list[DxfEntity]]] | None = None,
 ) -> list[HitboxRecord]:
     """Return a HitboxRecord for each label resolved via exact or cluster match."""
@@ -421,19 +428,21 @@ def build_hitboxes(
     ci = cluster_index or {}
 
     for label in labels:
-        key    = label.strip()
+        key = label.strip()
         entity = index.get(key)
 
         if entity is not None:
             leaflet = transform.to_leaflet(*entity["insert"])
-            bbox    = compute_bbox(entity, transform)
-            hitboxes.append({
-                "label":     label,
-                "found":     True,
-                "clustered": False,
-                "leaflet":   leaflet,
-                "bbox":      bbox,
-            })
+            bbox = compute_bbox(entity, transform)
+            hitboxes.append(
+                {
+                    "label": label,
+                    "found": True,
+                    "clustered": False,
+                    "leaflet": leaflet,
+                    "bbox": bbox,
+                }
+            )
             continue
 
         cluster_hits = ci.get(key) or ci.get(key.upper())
@@ -447,34 +456,47 @@ def build_hitboxes(
 # 5.  CLI
 # ──────────────────────────────────────────────
 
+
 def load_labels(path: str) -> list[str]:
     with open(path, encoding="utf-8") as f:
-        return [
-            line.strip()
-            for line in f
-            if line.strip() and not line.startswith("#")
-        ]
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Generate hitboxes.json from DXF + labels list (exact + cluster match)."
     )
-    p.add_argument("--dxf",       required=True,
-                   help="Path to .dxf file")
-    p.add_argument("--labels",    required=True,
-                   help="Text file with one label per line")
-    p.add_argument("--tile-meta", required=True, metavar="FILE",
-                   help="tile_meta.json from rasterise_tiles.py (provides Leaflet scale)")
-    p.add_argument("--out",       default="hitboxes.json", metavar="FILE",
-                   help="Output path for hitboxes.json (default: hitboxes.json)")
-    p.add_argument("--cluster-gap", type=float, default=_DEFAULT_CLUSTER_GAP, metavar="N",
-                   help=f"Vertical proximity threshold for clustering "
-                        f"(× cap-height, default {_DEFAULT_CLUSTER_GAP})")
-    p.add_argument("--h-tolerance", type=float, default=_DEFAULT_H_TOLERANCE, metavar="N",
-                   help=f"Horizontal proximity gate for clustering "
-                        f"(× cap-height, default {_DEFAULT_H_TOLERANCE})")
-    p.add_argument("--verbose",   action="store_true")
+    p.add_argument("--dxf", required=True, help="Path to .dxf file")
+    p.add_argument("--labels", required=True, help="Text file with one label per line")
+    p.add_argument(
+        "--tile-meta",
+        required=True,
+        metavar="FILE",
+        help="tile_meta.json from rasterise_tiles.py (provides Leaflet scale)",
+    )
+    p.add_argument(
+        "--out",
+        default="hitboxes.json",
+        metavar="FILE",
+        help="Output path for hitboxes.json (default: hitboxes.json)",
+    )
+    p.add_argument(
+        "--cluster-gap",
+        type=float,
+        default=_DEFAULT_CLUSTER_GAP,
+        metavar="N",
+        help=f"Vertical proximity threshold for clustering "
+        f"(× cap-height, default {_DEFAULT_CLUSTER_GAP})",
+    )
+    p.add_argument(
+        "--h-tolerance",
+        type=float,
+        default=_DEFAULT_H_TOLERANCE,
+        metavar="N",
+        help=f"Horizontal proximity gate for clustering "
+        f"(× cap-height, default {_DEFAULT_H_TOLERANCE})",
+    )
+    p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
 
 
@@ -491,10 +513,9 @@ def main(argv: list[str] | None = None) -> None:
     entities = extract_text_entities(args.dxf)
     logger.info("DXF text entities: %d", len(entities))
 
-    index         = build_index(entities)
+    index = build_index(entities)
     cluster_index = build_cluster_index(entities, args.cluster_gap, args.h_tolerance)
-    logger.debug("Index size: %d unique texts, %d cluster variants",
-                 len(index), len(cluster_index))
+    logger.debug("Index size: %d unique texts, %d cluster variants", len(index), len(cluster_index))
 
     with open(args.tile_meta, encoding="utf-8") as f:
         tile_meta = json.load(f)
@@ -505,13 +526,17 @@ def main(argv: list[str] | None = None) -> None:
     hitboxes = build_hitboxes(labels, index, transform, cluster_index)
 
     not_found = [
-        lbl for lbl in labels
+        lbl
+        for lbl in labels
         if index.get(lbl.strip()) is None
         and not (cluster_index.get(lbl.strip()) or cluster_index.get(lbl.strip().upper()))
     ]
-    logger.info("Matched: %d / %d  (cluster: %d)",
-                len(hitboxes), len(labels),
-                sum(1 for h in hitboxes if h.get("clustered")))
+    logger.info(
+        "Matched: %d / %d  (cluster: %d)",
+        len(hitboxes),
+        len(labels),
+        sum(1 for h in hitboxes if h.get("clustered")),
+    )
     if not_found:
         logger.warning("Unmatched (%d): %s", len(not_found), not_found[:10])
 

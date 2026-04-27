@@ -1,9 +1,13 @@
 # DXF Pipeline
 
-Two-stage pipeline that converts a DXF drawing to a Leaflet-compatible XYZ tile pyramid.
+Three-stage pipeline that converts a DXF drawing to Leaflet-compatible map tiles and clickable hitboxes.
 
 ```
-input.dxf  →  render_svg.py  →  drawing.svg  →  rasterise_tiles.py  →  tiles/ + tile_meta.json
+input.dxf ──► render_svg.py ──► drawing.svg ──► rasterise_tiles.py ──► tiles/ + tile_meta.json
+    │                                                                                │
+    └──────────────────────────────── extract_hitboxes.py ◄──────────────────────────┘
+                                              │
+                                        hitboxes.json
 ```
 
 ---
@@ -27,21 +31,53 @@ pip install pytest pytest-cov
 
 ## Running the Pipeline
 
-### Stage 1 — DXF → SVG
+### All stages at once (recommended)
+
+```bash
+python pipeline/run_pipeline.py \
+    --dxf diagrams/diagram1.dxf \
+    --labels diagrams/labels.txt \
+    --out-dir diagrams/
+```
+
+Options:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--dxf` | _(required)_ | Input DXF file |
+| `--labels` | _(required)_ | Text file with one label per line |
+| `--out-dir` | DXF directory | Directory for all outputs |
+| `--max-zoom` | `5` | Maximum tile zoom level |
+| `--themes-config` | — | JSON file with per-theme colours |
+| `--cluster-gap` | `3.5` | Vertical cluster proximity (× cap-height) |
+| `--h-tolerance` | `2.5` | Horizontal cluster gate (× cap-height) |
+| `--verbose` | — | Enable debug logging in stage 3 |
+
+Outputs (all under `--out-dir`):
+
+```
+{stem}.svg  (or {stem}_{theme}.svg per theme)
+tiles/{z}/{x}/{y}.webp
+tile_meta.json
+hitboxes.json
+```
+
+---
+
+### Running stages individually
+
+#### Stage 1 — DXF → SVG
 
 ```bash
 python pipeline/render_svg.py input.dxf output.svg
 
 # With theme colour overrides (renders one SVG per theme):
 python pipeline/render_svg.py input.dxf output.svg --themes-config diagrams/mock_viewer_themes.json
-
-# Convert text to outline paths (font-independent):
-python pipeline/render_svg.py input.dxf output.svg --text-to-path
 ```
 
-Outputs: `output.svg` (or `output_<theme>.svg` per theme) + `svg_manifest.json`
+Outputs: `output.svg` (or `output_<theme>.svg` per theme)
 
-### Stage 2 — SVG → Tile Pyramid
+#### Stage 2 — SVG → Tile Pyramid
 
 ```bash
 python pipeline/rasterise_tiles.py --svg output.svg
@@ -51,6 +87,18 @@ python pipeline/rasterise_tiles.py --svg output.svg --max-zoom 6 --tiles-dir til
 ```
 
 Outputs: `tiles/{z}/{x}/{y}.webp` + `tile_meta.json`
+
+#### Stage 3 — DXF + Labels → Hitboxes
+
+```bash
+python pipeline/extract_hitboxes.py \
+    --dxf input.dxf \
+    --labels labels.txt \
+    --tile-meta tile_meta.json \
+    --out hitboxes.json
+```
+
+Outputs: `hitboxes.json`
 
 ---
 
@@ -71,6 +119,8 @@ This runs all tests, reports coverage, and fails if coverage drops below 100%.
 ```bash
 pytest tests/test_render_svg.py
 pytest tests/test_rasterise_tiles.py
+pytest tests/test_extract_hitboxes.py
+pytest tests/test_run_pipeline.py
 ```
 
 ### Skip integration tests (faster, no cairosvg rendering)
@@ -118,18 +168,23 @@ ruff format pipeline/ tests/
 ```
 DXF_Pipeline/
 ├── conda/
-│   └── environment.yml       # conda env definition
+│   └── environment.yml           # conda env definition
 ├── diagrams/
-│   ├── diagram1.dxf          # sample DXF
+│   ├── diagram1.dxf              # sample DXF
+│   ├── labels.txt                # sample labels list
 │   └── mock_viewer_themes.json
 ├── pipeline/
-│   ├── pipeline_types.py     # shared TypedDict definitions
-│   ├── render_svg.py         # Stage 1: DXF → SVG
-│   └── rasterise_tiles.py    # Stage 2: SVG → tile pyramid
+│   ├── pipeline_types.py         # shared TypedDict definitions
+│   ├── render_svg.py             # Stage 1: DXF → SVG
+│   ├── rasterise_tiles.py        # Stage 2: SVG → tile pyramid
+│   ├── extract_hitboxes.py       # Stage 3: DXF + labels → hitboxes
+│   └── run_pipeline.py           # Runner: all three stages in sequence
 ├── tests/
-│   ├── conftest.py           # shared fixtures
+│   ├── conftest.py               # shared fixtures
 │   ├── test_render_svg.py
-│   └── test_rasterise_tiles.py
-├── pyproject.toml            # pytest, coverage, mypy, ruff config
+│   ├── test_rasterise_tiles.py
+│   ├── test_extract_hitboxes.py
+│   └── test_run_pipeline.py
+├── pyproject.toml                # pytest, coverage, mypy, ruff config
 └── README.md
 ```

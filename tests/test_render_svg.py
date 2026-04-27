@@ -104,33 +104,6 @@ class TestRenderSvgBasic:
 
 
 # ─────────────────────────────────────────────────────────────
-# --text-to-path flag
-# ─────────────────────────────────────────────────────────────
-
-
-class TestTextToPath:
-    def test_without_flag_has_text_or_path_elements(self, tmp_path, minimal_dxf):
-        svg_out = tmp_path / "out.svg"
-        result = _call_render([str(minimal_dxf), str(svg_out)])
-        assert result.returncode == 0, result.stderr
-        content = svg_out.read_text(encoding="utf-8")
-        # At minimum the SVG should contain some content derived from the DXF
-        assert len(content) > 200
-
-    def test_with_flag_exits_zero(self, tmp_path, minimal_dxf):
-        # --text-to-path should either succeed or gracefully fall back
-        svg_out = tmp_path / "out.svg"
-        result = _call_render([str(minimal_dxf), str(svg_out), "--text-to-path"])
-        assert result.returncode == 0, result.stderr
-
-    def test_with_flag_svg_produced(self, tmp_path, minimal_dxf):
-        svg_out = tmp_path / "out.svg"
-        _call_render([str(minimal_dxf), str(svg_out), "--text-to-path"])
-        assert svg_out.exists()
-        assert svg_out.stat().st_size > 0
-
-
-# ─────────────────────────────────────────────────────────────
 # Degenerate inputs
 # ─────────────────────────────────────────────────────────────
 
@@ -209,45 +182,6 @@ class TestThemesConfig:
         assert (tmp_path / "drawing_light.svg").exists()
         assert (tmp_path / "drawing_dark.svg").exists()
         assert not (tmp_path / "drawing__comment.svg").exists()
-
-    def test_manifest_written_with_themes(self, tmp_path, minimal_dxf):
-        themes = {
-            "light": {"background": "#ffffff", "layers": {}},
-            "dark": {"background": "#1a1a2e", "layers": {}},
-        }
-        cfg = self._make_themes_file(tmp_path, themes)
-        svg_base = tmp_path / "drawing.svg"
-        result = _call_render([str(minimal_dxf), str(svg_base), "--themes-config", str(cfg)])
-        assert result.returncode == 0, result.stderr
-
-        manifest_path = tmp_path / "svg_manifest.json"
-        assert manifest_path.exists()
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert len(manifest) == 2
-        themes_in_manifest = {e["theme"] for e in manifest}
-        assert themes_in_manifest == {"light", "dark"}
-
-    def test_manifest_written_without_themes(self, tmp_path, minimal_dxf):
-        """Default run (no --themes-config) still writes svg_manifest.json."""
-        svg_out = tmp_path / "out.svg"
-        result = _call_render([str(minimal_dxf), str(svg_out)])
-        assert result.returncode == 0, result.stderr
-
-        manifest_path = tmp_path / "svg_manifest.json"
-        assert manifest_path.exists()
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert len(manifest) == 1
-        assert manifest[0]["theme"] is None
-        assert manifest[0]["svg"] == str(svg_out.resolve())
-
-    def test_manifest_background_matches_config(self, tmp_path, minimal_dxf):
-        themes = {"dark": {"background": "#1a1a2e", "layers": {}}}
-        cfg = self._make_themes_file(tmp_path, themes)
-        svg_base = tmp_path / "drawing.svg"
-        _call_render([str(minimal_dxf), str(svg_base), "--themes-config", str(cfg)])
-
-        manifest = json.loads((tmp_path / "svg_manifest.json").read_text(encoding="utf-8"))
-        assert manifest[0]["background"] == "#1a1a2e"
 
     def test_unknown_layer_does_not_crash(self, tmp_path, minimal_dxf):
         """A layer name in themes.json that doesn't exist in the DXF is a warning, not a crash."""
