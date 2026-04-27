@@ -10,6 +10,12 @@ from extract_hitboxes import (
     CoordTransform,
     DxfEntity,
     HitboxRecord,
+    _cluster_rows,
+    _entity_dxf_corners,
+    _entity_centre,
+    _inverted_t_variants,
+    build_cluster_index,
+    build_clusters,
     build_hitboxes,
     build_index,
     compute_bbox,
@@ -233,6 +239,43 @@ def _make_tf(minimal_tile_meta) -> CoordTransform:
     return CoordTransform(_DXF_EXTENTS, minimal_tile_meta)
 
 
+# ─────────────────────────────────────────────────────────────
+# _entity_dxf_corners
+# ─────────────────────────────────────────────────────────────
+
+class TestEntityDxfCorners:
+    def test_zero_height_returns_none(self):
+        assert _entity_dxf_corners(_make_entity(height=0.0)) is None
+
+    def test_returns_four_corners(self):
+        corners = _entity_dxf_corners(_make_entity(height=2.5))
+        assert corners is not None
+        assert len(corners) == 4
+
+    def test_corners_span_text_width_left_aligned(self):
+        # Left-aligned: right edge ≈ insert_x + len * height * 0.6
+        e = _make_entity(text="ABCDE", x=10.0, height=2.0, halign=0)
+        corners = _entity_dxf_corners(e)
+        xs = [c[0] for c in corners]
+        expected_w = len("ABCDE") * 2.0 * 0.6   # raw_w without pad
+        assert max(xs) > 10.0 + expected_w * 0.9
+
+
+class TestEntityCentre:
+    def test_normal_entity_returns_bbox_centre(self):
+        # Left-aligned entity at origin: centre should be to the right of insert
+        e = _make_entity(text="AB", x=0.0, y=0.0, height=2.5, halign=0)
+        cx, cy = _entity_centre(e)
+        assert cx > 0.0
+
+    def test_zero_height_falls_back_to_insert(self):
+        # height=0 → _entity_dxf_corners returns None → fallback to insert
+        e = _make_entity(x=7.0, y=3.0, height=0.0)
+        cx, cy = _entity_centre(e)
+        assert cx == pytest.approx(7.0)
+        assert cy == pytest.approx(3.0)
+
+
 class TestComputeBbox:
     def test_zero_height_returns_none(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
@@ -361,6 +404,129 @@ class TestBuildIndex:
 
 
 # ─────────────────────────────────────────────────────────────
+# build_clusters
+# ─────────────────────────────────────────────────────────────
+
+def _nearby_pair(text_top="FV", text_bot="501", h=2.5, x=10.0, gap=1.5):
+    """Two entities separated by gap × h vertically (within default cluster threshold)."""
+    top = _make_entity(text_top, x=x, y=50.0,           height=h)
+    bot = _make_entity(text_bot, x=x, y=50.0 - gap * h, height=h)
+    return top, bot
+
+
+class TestBuildClusters:
+    def test_empty_returns_empty(self):
+        assert build_clusters([]) == []
+
+    def test_single_entity_no_cluster(self):
+        # Clusters require ≥2 members
+        assert build_clusters([_make_entity("FV101")]) == []
+
+    def test_nearby_vertical_entities_cluster(self):
+        top, bot = _nearby_pair()
+        clusters = build_clusters([top, bot])
+        assert len(clusters) == 1
+        assert len(clusters[0]) == 2
+
+    def test_distant_entities_no_cluster(self):
+        # Separate by 10 × height — far outside default gap_factor=3.5
+        top = _make_entity("FV",  x=10.0, y=50.0, height=2.5)
+        bot = _make_entity("501", x=10.0, y=25.0, height=2.5)
+        assert build_clusters([top, bot]) == []
+
+    def test_cluster_reading_order_top_first(self):
+        # Higher Y entity (top of page) must come first in returned cluster
+        top, bot = _nearby_pair()
+        clusters = build_clusters([bot, top])   # supply in reversed order
+        assert clusters[0][0]["text"] == "FV"   # top entity first
+
+
+# ─────────────────────────────────────────────────────────────
+# build_cluster_index
+# ─────────────────────────────────────────────────────────────
+
+class TestBuildClusterIndex:
+    def _pair(self, top_text, bot_text, h=2.5, gap=1.5):
+        return [
+            _make_entity(top_text, x=10.0, y=50.0,           height=h),
+            _make_entity(bot_text, x=10.0, y=50.0 - gap * h, height=h),
+        ]
+
+    def test_simple_pair_no_separator(self):
+        entities = self._pair("FV", "501")
+        idx = build_cluster_index(entities)
+        assert "FV501" in idx
+
+    def test_simple_pair_space_separator(self):
+        entities = self._pair("FV", "501")
+        idx = build_cluster_index(entities)
+        assert "FV 501" in idx
+
+    def test_inverted_t_variants(self):
+        # "FV" on top, "12" and "54" side-by-side below
+        top = _make_entity("FV", x=10.0, y=50.0,  height=2.5)
+        b1  = _make_entity("12", x=7.0,  y=46.25, height=2.5)   # y = 50 - 1.5*2.5
+        b2  = _make_entity("54", x=13.0, y=46.25, height=2.5)
+        idx = build_cluster_index([top, b1, b2])
+        assert "FV12"   in idx
+        assert "FV 12"  in idx
+        assert "FV54"   in idx
+        assert "FV 54"  in idx
+
+    def test_case_insensitive_key(self):
+        entities = self._pair("fv", "501")
+        idx = build_cluster_index(entities)
+        assert "FV501" in idx   # upper-case key must also be present
+
+    def test_isolated_entities_not_indexed(self):
+        # Two entities far apart → no cluster → empty index
+        e1 = _make_entity("AA", x=0.0,   y=0.0,  height=2.5)
+        e2 = _make_entity("BB", x=100.0, y=50.0, height=2.5)
+        assert build_cluster_index([e1, e2]) == {}
+
+
+class TestClusterRows:
+    def test_two_distinct_rows_returns_tokens(self):
+        top = _make_entity("FV",  x=10.0, y=50.0,  height=2.5)
+        bot = _make_entity("501", x=10.0, y=46.25, height=2.5)
+        rows = _cluster_rows([top, bot])
+        assert rows is not None
+        top_tokens, bot_tokens = rows
+        assert top_tokens == ["FV"]
+        assert bot_tokens == ["501"]
+
+    def test_single_row_returns_none(self):
+        # All entities at the same Y → no second row → None
+        e1 = _make_entity("FV",  x=5.0,  y=50.0, height=2.5)
+        e2 = _make_entity("501", x=15.0, y=50.0, height=2.5)
+        assert _cluster_rows([e1, e2]) is None
+
+
+class TestInvertedTVariants:
+    def test_three_entity_inverted_t(self):
+        top = _make_entity("FV", x=10.0, y=50.0,  height=2.5)
+        b1  = _make_entity("12", x=7.0,  y=46.25, height=2.5)
+        b2  = _make_entity("54", x=13.0, y=46.25, height=2.5)
+        variants = _inverted_t_variants([top, b1, b2])
+        assert "FV12" in variants
+        assert "FV54" in variants
+
+    def test_single_row_cluster_returns_empty(self):
+        # All same Y → _cluster_rows returns None → guard branch (line 320)
+        e1 = _make_entity("FV",  x=5.0,  y=50.0, height=2.5)
+        e2 = _make_entity("501", x=15.0, y=50.0, height=2.5)
+        e3 = _make_entity("XYZ", x=25.0, y=50.0, height=2.5)
+        assert _inverted_t_variants([e1, e2, e3]) == set()
+
+    def test_two_top_one_bottom_returns_empty(self):
+        # Two top tokens, one bottom → not inverted-T → guard branch (line 323)
+        t1  = _make_entity("FV",  x=5.0,  y=50.0,  height=2.5)
+        t2  = _make_entity("HV",  x=15.0, y=50.0,  height=2.5)
+        bot = _make_entity("501", x=10.0, y=46.25, height=2.5)
+        assert _inverted_t_variants([t1, t2, bot]) == set()
+
+
+# ─────────────────────────────────────────────────────────────
 # build_hitboxes
 # ─────────────────────────────────────────────────────────────
 
@@ -397,17 +563,11 @@ class TestBuildHitboxes:
         assert bbox is not None
         assert len(bbox["leaflet"]["corners"]) == 4
 
-    def test_no_transform_leaflet_and_bbox_are_none(self):
-        idx = build_index([_make_entity("FV101", x=50.0, y=50.0, height=2.5)])
-        result = build_hitboxes(["FV101"], idx, transform=None)
-        assert result[0]["leaflet"] is None
-        assert result[0]["bbox"] is None
-
     def test_hitbox_record_has_exactly_required_keys(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
         idx = build_index([_make_entity("FV101", x=50.0, y=50.0, height=2.5)])
         record = build_hitboxes(["FV101"], idx, tf)[0]
-        assert set(record.keys()) == {"label", "found", "leaflet", "bbox"}
+        assert set(record.keys()) == {"label", "found", "clustered", "leaflet", "bbox"}
 
     def test_mixed_found_and_not_found(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
@@ -422,6 +582,47 @@ class TestBuildHitboxes:
         idx = build_index([_make_entity("FV101", x=50.0, y=50.0, height=2.5)])
         result = build_hitboxes(["  FV101  "], idx, tf)
         assert len(result) == 1
+
+    def test_exact_match_clustered_is_false(self, minimal_tile_meta):
+        tf = _make_tf(minimal_tile_meta)
+        idx = build_index([_make_entity("FV101", x=50.0, y=50.0, height=2.5)])
+        result = build_hitboxes(["FV101"], idx, tf)
+        assert result[0]["clustered"] is False
+
+    def test_cluster_match_found(self, minimal_tile_meta):
+        tf = _make_tf(minimal_tile_meta)
+        top = _make_entity("FV",  x=10.0, y=50.0,  height=2.5)
+        bot = _make_entity("501", x=10.0, y=46.25, height=2.5)
+        ci  = build_cluster_index([top, bot])
+        result = build_hitboxes(["FV501"], {}, tf, cluster_index=ci)
+        assert len(result) == 1
+        assert result[0]["found"] is True
+
+    def test_cluster_match_has_clustered_true(self, minimal_tile_meta):
+        tf = _make_tf(minimal_tile_meta)
+        top = _make_entity("FV",  x=10.0, y=50.0,  height=2.5)
+        bot = _make_entity("501", x=10.0, y=46.25, height=2.5)
+        ci  = build_cluster_index([top, bot])
+        result = build_hitboxes(["FV501"], {}, tf, cluster_index=ci)
+        assert result[0]["clustered"] is True
+
+    def test_cluster_match_bbox_spans_both_entities(self, minimal_tile_meta):
+        tf = _make_tf(minimal_tile_meta)
+        top = _make_entity("FV",  x=10.0, y=50.0,  height=2.5)
+        bot = _make_entity("501", x=10.0, y=46.25, height=2.5)
+        ci  = build_cluster_index([top, bot])
+        result  = build_hitboxes(["FV501"], {}, tf, cluster_index=ci)
+        bbox    = result[0]["bbox"]
+        assert bbox is not None
+        lats = [c["lat"] for c in bbox["leaflet"]["corners"]]
+        lngs = [c["lng"] for c in bbox["leaflet"]["corners"]]
+        # Merged bbox must span a larger area than either individual entity
+        top_bbox = compute_bbox(top, tf)
+        bot_bbox = compute_bbox(bot, tf)
+        top_lats = [c["lat"] for c in top_bbox["leaflet"]["corners"]]
+        bot_lats = [c["lat"] for c in bot_bbox["leaflet"]["corners"]]
+        assert min(lats) <= min(top_lats + bot_lats)
+        assert max(lats) >= max(top_lats + bot_lats)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -461,15 +662,17 @@ class TestLoadLabels:
 
 class TestParseArgs:
     def test_required_args_parsed(self):
-        args = parse_args(["--dxf", "a.dxf", "--labels", "b.txt"])
+        args = parse_args(["--dxf", "a.dxf", "--labels", "b.txt", "--tile-meta", "meta.json"])
         assert args.dxf == "a.dxf"
         assert args.labels == "b.txt"
+        assert args.tile_meta == "meta.json"
 
     def test_defaults(self):
-        args = parse_args(["--dxf", "a.dxf", "--labels", "b.txt"])
-        assert args.tile_meta is None
+        args = parse_args(["--dxf", "a.dxf", "--labels", "b.txt", "--tile-meta", "meta.json"])
         assert args.out == "hitboxes.json"
         assert args.verbose is False
+        assert args.cluster_gap == 3.5
+        assert args.h_tolerance == 2.5
 
     def test_optional_args(self):
         args = parse_args([
@@ -481,6 +684,14 @@ class TestParseArgs:
         assert args.tile_meta == "meta.json"
         assert args.out == "out/hb.json"
         assert args.verbose is True
+
+    def test_cluster_gap_arg(self):
+        args = parse_args(["--dxf", "a.dxf", "--labels", "b.txt", "--tile-meta", "meta.json", "--cluster-gap", "5.0"])
+        assert args.cluster_gap == pytest.approx(5.0)
+
+    def test_h_tolerance_arg(self):
+        args = parse_args(["--dxf", "a.dxf", "--labels", "b.txt", "--tile-meta", "meta.json", "--h-tolerance", "1.0"])
+        assert args.h_tolerance == pytest.approx(1.0)
 
     def test_missing_dxf_exits(self):
         with pytest.raises(SystemExit):
@@ -496,35 +707,9 @@ class TestParseArgs:
 # ─────────────────────────────────────────────────────────────
 
 class TestMain:
-    def test_writes_hitboxes_without_tile_meta(self, minimal_dxf, tmp_path):
-        labels_path = tmp_path / "labels.txt"
-        labels_path.write_text("FV101\nHV201\nMISSING\n", encoding="utf-8")
-        out_path = tmp_path / "hitboxes.json"
-
-        main(["--dxf", str(minimal_dxf), "--labels", str(labels_path), "--out", str(out_path)])
-
-        assert out_path.exists()
-        data = json.loads(out_path.read_text())
-        assert isinstance(data, list)
-        labels_out = [r["label"] for r in data]
-        assert "FV101" in labels_out
-        assert "HV201" in labels_out
-        assert "MISSING" not in labels_out
-
-    def test_null_coords_without_tile_meta(self, minimal_dxf, tmp_path):
-        labels_path = tmp_path / "labels.txt"
-        labels_path.write_text("FV101\n", encoding="utf-8")
-        out_path = tmp_path / "hitboxes.json"
-
-        main(["--dxf", str(minimal_dxf), "--labels", str(labels_path), "--out", str(out_path)])
-
-        data = json.loads(out_path.read_text())
-        assert data[0]["leaflet"] is None
-        assert data[0]["bbox"] is None
-
     def test_with_tile_meta_populates_coords(self, minimal_dxf, tmp_path, minimal_tile_meta):
         labels_path = tmp_path / "labels.txt"
-        labels_path.write_text("FV101\n", encoding="utf-8")
+        labels_path.write_text("FV101\nHV201\nMISSING\n", encoding="utf-8")
         meta_path = tmp_path / "tile_meta.json"
         meta_path.write_text(json.dumps(minimal_tile_meta), encoding="utf-8")
         out_path = tmp_path / "hitboxes.json"
@@ -537,27 +722,69 @@ class TestMain:
         ])
 
         data = json.loads(out_path.read_text())
+        labels_out = [r["label"] for r in data]
+        assert "FV101" in labels_out
+        assert "HV201" in labels_out
+        assert "MISSING" not in labels_out
         assert data[0]["leaflet"] is not None
         assert data[0]["bbox"] is not None
 
-    def test_creates_output_directory(self, minimal_dxf, tmp_path):
+    def test_creates_output_directory(self, minimal_dxf, tmp_path, minimal_tile_meta):
         labels_path = tmp_path / "labels.txt"
         labels_path.write_text("FV101\n", encoding="utf-8")
+        meta_path = tmp_path / "tile_meta.json"
+        meta_path.write_text(json.dumps(minimal_tile_meta), encoding="utf-8")
         out_path = tmp_path / "sub" / "dir" / "hitboxes.json"
 
-        main(["--dxf", str(minimal_dxf), "--labels", str(labels_path), "--out", str(out_path)])
+        main(["--dxf", str(minimal_dxf), "--labels", str(labels_path),
+              "--tile-meta", str(meta_path), "--out", str(out_path)])
 
         assert out_path.exists()
 
-    def test_verbose_flag_accepted(self, minimal_dxf, tmp_path):
+    def test_verbose_flag_accepted(self, minimal_dxf, tmp_path, minimal_tile_meta):
         labels_path = tmp_path / "labels.txt"
         labels_path.write_text("FV101\n", encoding="utf-8")
+        meta_path = tmp_path / "tile_meta.json"
+        meta_path.write_text(json.dumps(minimal_tile_meta), encoding="utf-8")
         out_path = tmp_path / "hitboxes.json"
 
         main([
             "--dxf", str(minimal_dxf),
             "--labels", str(labels_path),
+            "--tile-meta", str(meta_path),
             "--out", str(out_path),
             "--verbose",
         ])
         # No exception = pass
+
+    def test_cluster_labels_resolved(self, tmp_path, minimal_tile_meta):
+        import ezdxf
+
+        # Build a DXF where "FV" sits above "101" (close enough to cluster)
+        doc = ezdxf.new(dxfversion="R2010")
+        msp = doc.modelspace()
+        msp.add_text("FV",  dxfattribs={"insert": (10.0, 25.0), "height": 2.5})
+        msp.add_text("101", dxfattribs={"insert": (10.0, 20.0), "height": 2.5})
+        # Add a polyline so get_dxf_extents doesn't fail on empty geometry
+        msp.add_lwpolyline([(0, 0), (50, 0), (50, 50), (0, 50)], dxfattribs={"closed": True})
+        dxf_path = tmp_path / "cluster.dxf"
+        doc.saveas(str(dxf_path))
+
+        labels_path = tmp_path / "labels.txt"
+        labels_path.write_text("FV101\n", encoding="utf-8")
+        meta_path = tmp_path / "tile_meta.json"
+        meta_path.write_text(json.dumps(minimal_tile_meta), encoding="utf-8")
+        out_path = tmp_path / "hitboxes.json"
+
+        main([
+            "--dxf", str(dxf_path),
+            "--labels", str(labels_path),
+            "--tile-meta", str(meta_path),
+            "--out", str(out_path),
+        ])
+
+        data = json.loads(out_path.read_text())
+        assert len(data) == 1
+        assert data[0]["label"] == "FV101"
+        assert data[0]["found"] is True
+        assert data[0]["clustered"] is True
