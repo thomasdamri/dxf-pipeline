@@ -253,6 +253,56 @@ class TestMain:
         assert meta_path.exists()
         assert list(tiles_dir.rglob("*.webp"))
 
+    def test_preserveaspectratio_none_injected(self, tmp_path, simple_svg, minimal_png):
+        """main() injects preserveAspectRatio="none" into SVG bytes before rendering."""
+        png_bytes = minimal_png.read_bytes()
+        calls: list[bytes] = []
+
+        def capture(**kwargs):
+            calls.append(kwargs.get("bytestring", b""))
+            return png_bytes
+
+        with patch("rasterise_tiles.cairosvg.svg2png", side_effect=capture):
+            rasterise_tiles.main(
+                ["--svg", str(simple_svg), "--max-zoom", "0",
+                 "--tiles-dir", str(tmp_path / "tiles"),
+                 "--tile-meta", str(tmp_path / "tile_meta.json")]
+            )
+
+        assert calls
+        for bs in calls:
+            assert b'preserveAspectRatio="none"' in bs
+
+    def test_existing_preserveaspectratio_replaced(self, tmp_path, minimal_png):
+        """main() replaces an existing preserveAspectRatio value with "none"."""
+        svg = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<svg xmlns="http://www.w3.org/2000/svg"'
+            ' preserveAspectRatio="xMidYMid meet"'
+            ' viewBox="0 0 200 100" width="200mm" height="100mm">\n'
+            "  <rect/>\n</svg>\n"
+        )
+        svg_path = tmp_path / "par.svg"
+        svg_path.write_text(svg, encoding="utf-8")
+        png_bytes = minimal_png.read_bytes()
+        calls: list[bytes] = []
+
+        def capture(**kwargs):
+            calls.append(kwargs.get("bytestring", b""))
+            return png_bytes
+
+        with patch("rasterise_tiles.cairosvg.svg2png", side_effect=capture):
+            rasterise_tiles.main(
+                ["--svg", str(svg_path), "--max-zoom", "0",
+                 "--tiles-dir", str(tmp_path / "tiles"),
+                 "--tile-meta", str(tmp_path / "tile_meta.json")]
+            )
+
+        assert calls
+        for bs in calls:
+            assert b'preserveAspectRatio="none"' in bs
+            assert b'"xMidYMid meet"' not in bs
+
     def test_main_strip_no_viewbox_raises(self, tmp_path, minimal_png):
         """Strip path raises ValueError when SVG bytes have no viewBox attribute."""
         # SVG with width/height but no viewBox — passes _read_svg_viewbox but

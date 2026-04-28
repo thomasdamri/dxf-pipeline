@@ -137,6 +137,9 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     svg_bytes = Path(args.svg).read_bytes()
+    # "none" prevents cairosvg letterboxing that causes transparent margins and seams at strip boundaries.
+    svg_bytes = re.sub(rb'preserveAspectRatio="[^"]*"', b"", svg_bytes)
+    svg_bytes = re.sub(rb"<svg\b", b'<svg preserveAspectRatio="none"', svg_bytes, count=1)
     Image.MAX_IMAGE_PIXELS = full_w_px * full_h_px + 1  # silence decompression-bomb warning
 
     n_strips = math.ceil(full_w_px / CAIRO_MAX_DIM)
