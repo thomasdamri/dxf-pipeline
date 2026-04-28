@@ -44,7 +44,7 @@ class TestExtractTextEntities:
     def test_entity_has_required_keys(self, minimal_dxf):
         result = extract_text_entities(str(minimal_dxf))
         assert len(result) > 0
-        for key in ("text", "insert", "height", "halign", "valign", "layer", "type"):
+        for key in ("text", "insert", "height", "width_factor", "halign", "valign", "layer", "type"):
             assert key in result[0], f"Missing key: {key}"
 
     def test_insert_is_float_tuple(self, minimal_dxf):
@@ -117,6 +117,32 @@ class TestExtractTextEntities:
         doc.saveas(str(dxf_path))
 
         assert extract_text_entities(str(dxf_path)) == []
+
+    def test_width_factor_read_from_dxf(self, tmp_path):
+        import ezdxf
+
+        doc = ezdxf.new(dxfversion="R2010")
+        doc.modelspace().add_text(
+            "FV101", dxfattribs={"insert": (0, 0), "height": 0.94, "width": 0.9}
+        )
+        dxf_path = tmp_path / "wf.dxf"
+        doc.saveas(str(dxf_path))
+
+        result = extract_text_entities(str(dxf_path))
+        entity = next(e for e in result if e["text"] == "FV101")
+        assert entity["width_factor"] == pytest.approx(0.9)
+
+    def test_mtext_width_factor_is_one(self, tmp_path):
+        import ezdxf
+
+        doc = ezdxf.new(dxfversion="R2010")
+        doc.modelspace().add_mtext("MLABEL", dxfattribs={"insert": (0, 0), "char_height": 2.5})
+        dxf_path = tmp_path / "mtext_wf.dxf"
+        doc.saveas(str(dxf_path))
+
+        result = extract_text_entities(str(dxf_path))
+        mtext = next(e for e in result if e["text"] == "MLABEL")
+        assert mtext["width_factor"] == pytest.approx(1.0)
 
     def test_empty_mtext_entities_excluded(self, tmp_path):
         import ezdxf
@@ -237,6 +263,7 @@ def _make_entity(
     x: float = 0.0,
     y: float = 0.0,
     height: float = 2.5,
+    width_factor: float = 1.0,
     halign: int | None = 0,
     valign: int | None = 0,
     etype: str = "TEXT",
@@ -245,6 +272,7 @@ def _make_entity(
         "text": text,
         "insert": (x, y),
         "height": height,
+        "width_factor": width_factor,
         "halign": halign,
         "valign": valign,
         "layer": "TEXT",
@@ -277,6 +305,17 @@ class TestEntityDxfCorners:
         xs = [c[0] for c in corners]
         expected_w = len("ABCDE") * 2.0 * 0.6  # raw_w without pad
         assert max(xs) > 10.0 + expected_w * 0.9
+
+    def test_width_factor_scales_bbox_width(self):
+        # width_factor=0.5 should produce a bbox roughly half as wide as width_factor=1.0
+        e_full = _make_entity(text="ABCDE", x=0.0, height=2.0, width_factor=1.0, halign=0)
+        e_half = _make_entity(text="ABCDE", x=0.0, height=2.0, width_factor=0.5, halign=0)
+        corners_full = _entity_dxf_corners(e_full)
+        corners_half = _entity_dxf_corners(e_half)
+        assert corners_full is not None and corners_half is not None
+        w_full = max(c[0] for c in corners_full) - min(c[0] for c in corners_full)
+        w_half = max(c[0] for c in corners_half) - min(c[0] for c in corners_half)
+        assert w_half < w_full * 0.75  # clearly narrower
 
 
 class TestEntityCentre:

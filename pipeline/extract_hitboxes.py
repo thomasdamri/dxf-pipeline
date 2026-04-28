@@ -35,6 +35,7 @@ class DxfEntity(TypedDict):
     text: str
     insert: tuple[float, float]
     height: float
+    width_factor: float  # DXF group code 41; 1.0 = normal, <1 condensed, >1 expanded
     halign: int | None
     valign: int | None
     layer: str
@@ -85,6 +86,7 @@ def extract_text_entities(dxf_path: str) -> list[DxfEntity]:
                     "text": text,
                     "insert": (round(e.dxf.insert.x, 4), round(e.dxf.insert.y, 4)),
                     "height": getattr(e.dxf, "height", 2.5) or 2.5,
+                    "width_factor": getattr(e.dxf, "width", 1.0) or 1.0,
                     "halign": getattr(e.dxf, "halign", 0),
                     "valign": getattr(e.dxf, "valign", 0),
                     "layer": getattr(e.dxf, "layer", "0") or "0",
@@ -100,6 +102,7 @@ def extract_text_entities(dxf_path: str) -> list[DxfEntity]:
                     "text": text,
                     "insert": (round(e.dxf.insert.x, 4), round(e.dxf.insert.y, 4)),
                     "height": getattr(e.dxf, "char_height", 2.5) or 2.5,
+                    "width_factor": 1.0,
                     "halign": None,
                     "valign": None,
                     "layer": getattr(e.dxf, "layer", "0") or "0",
@@ -178,7 +181,7 @@ def _entity_dxf_corners(entity: DxfEntity) -> list[tuple[float, float]] | None:
     if h <= 0.0:
         return None
 
-    raw_w = len(entity["text"]) * h * _CHAR_WIDTH
+    raw_w = len(entity["text"]) * h * _CHAR_WIDTH * (entity.get("width_factor") or 1.0)
     pad = h * _PAD
     ix, iy = entity["insert"]
     halign = entity.get("halign") or 0
@@ -453,7 +456,138 @@ def build_hitboxes(
 
 
 # ──────────────────────────────────────────────
-# 5.  CLI
+# 5.  Debug SVG
+# ──────────────────────────────────────────────
+
+_SVG_MAX_DIM = 4000  # longest side of the debug SVG in pixels
+
+
+def _svg_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def write_debug_svg(
+    entities: list[DxfEntity],
+    labels: list[str],
+    index: dict[str, DxfEntity],
+    cluster_index: dict[str, list[list[DxfEntity]]],
+    extents: dict,
+    out_path: str,
+) -> None:
+    """Render all text-entity bboxes into an SVG for debugging hitbox placement.
+
+    Colour key:
+      green  — exact label match
+      blue   — cluster label match
+      gray   — unmatched DXF entity (not in labels list)
+    """
+    x_min, y_min = extents["x_min"], extents["y_min"]
+    dxf_w, dxf_h = extents["width"], extents["height"]
+
+    if dxf_w <= 0 or dxf_h <= 0:
+        logger.warning("Cannot write debug SVG: zero-size extents")
+        return
+
+    if dxf_w >= dxf_h:
+        svg_w = _SVG_MAX_DIM
+        svg_h = int(_SVG_MAX_DIM * dxf_h / dxf_w)
+    else:
+        svg_h = _SVG_MAX_DIM
+        svg_w = int(_SVG_MAX_DIM * dxf_w / dxf_h)
+
+    scale = svg_w / dxf_w
+
+    def to_svg(dxf_x: float, dxf_y: float) -> tuple[float, float]:
+        return (dxf_x - x_min) * scale, (extents["y_max"] - dxf_y) * scale
+
+    def rect_from_corners(corners: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+        pts = [to_svg(x, y) for x, y in corners]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+
+    # Classify every entity
+    exact_ids: set[int] = set()
+    cluster_ids: set[int] = set()
+    not_found: list[str] = []
+
+    for label in labels:
+        key = label.strip()
+        entity = index.get(key)
+        if entity is not None:
+            exact_ids.add(id(entity))
+        else:
+            hits = cluster_index.get(key) or cluster_index.get(key.upper())
+            if hits:
+                for e in hits[0]:
+                    cluster_ids.add(id(e))
+            else:
+                not_found.append(label)
+
+    parts: list[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" height="{svg_h}" viewBox="0 0 {svg_w} {svg_h}">',
+        f'<rect width="{svg_w}" height="{svg_h}" fill="#1a1a1a"/>',
+        '<g id="entities">',
+    ]
+
+    for e in entities:
+        corners = _entity_dxf_corners(e)
+        if corners is None:
+            continue
+        rx, ry, rw, rh = rect_from_corners(corners)
+        eid = id(e)
+        if eid in exact_ids:
+            fill, stroke, text_fill = "rgba(0,200,80,0.30)", "#00c850", "#00ff88"
+        elif eid in cluster_ids:
+            fill, stroke, text_fill = "rgba(60,140,255,0.30)", "#3c8cff", "#80bfff"
+        else:
+            fill, stroke, text_fill = "rgba(180,180,180,0.12)", "#666", "#999"
+
+        parts.append(
+            f'<rect x="{rx:.2f}" y="{ry:.2f}" width="{rw:.2f}" height="{rh:.2f}"'
+            f' fill="{fill}" stroke="{stroke}" stroke-width="0.8"/>'
+        )
+        font_px = max(5.0, min(14.0, rh * 0.55))
+        label_txt = _svg_escape(e["text"])
+        cx, cy = rx + rw / 2, ry + rh / 2
+        parts.append(
+            f'<text x="{cx:.2f}" y="{cy:.2f}" font-size="{font_px:.1f}" font-family="monospace"'
+            f' text-anchor="middle" dominant-baseline="middle" fill="{text_fill}">{label_txt}</text>'
+        )
+
+    parts.append("</g>")
+
+    # Legend
+    legend = [
+        ("rgba(0,200,80,0.30)", "#00c850", "#00ff88", "Exact match"),
+        ("rgba(60,140,255,0.30)", "#3c8cff", "#80bfff", "Cluster match"),
+        ("rgba(180,180,180,0.12)", "#666", "#999", "Unmatched entity"),
+    ]
+    lx, ly = 12, 12
+    for fill, stroke, text_fill, desc in legend:
+        parts.append(
+            f'<rect x="{lx}" y="{ly}" width="16" height="10" fill="{fill}" stroke="{stroke}" stroke-width="0.8"/>'
+        )
+        parts.append(
+            f'<text x="{lx + 22}" y="{ly + 9}" font-size="11" font-family="sans-serif" fill="{text_fill}">{desc}</text>'
+        )
+        ly += 17
+
+    if not_found:
+        preview = ", ".join(not_found[:8]) + ("…" if len(not_found) > 8 else "")
+        parts.append(
+            f'<text x="{lx}" y="{ly + 12}" font-size="10" font-family="monospace" fill="#ff6666">'
+            f'Not found ({len(not_found)}): {_svg_escape(preview)}</text>'
+        )
+
+    parts.append("</svg>")
+
+    Path(out_path).write_text("\n".join(parts), encoding="utf-8")
+    logger.info("Debug SVG written: %s", out_path)
+
+
+# ──────────────────────────────────────────────
+# 6.  CLI
 # ──────────────────────────────────────────────
 
 
@@ -495,6 +629,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="N",
         help=f"Horizontal proximity gate for clustering "
         f"(× cap-height, default {_DEFAULT_H_TOLERANCE})",
+    )
+    p.add_argument(
+        "--svg-out",
+        metavar="FILE",
+        help="Write a debug SVG with all entity bboxes and match highlights (optional)",
     )
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
@@ -545,6 +684,9 @@ def main(argv: list[str] | None = None) -> None:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(hitboxes, f, indent=2, ensure_ascii=False)
     logger.info("Written: %s (%d records)", out_path, len(hitboxes))
+
+    if args.svg_out:
+        write_debug_svg(entities, labels, index, cluster_index, extents, args.svg_out)
 
 
 if __name__ == "__main__":
