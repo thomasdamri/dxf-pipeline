@@ -8,7 +8,6 @@ import json
 import pytest
 from extract_hitboxes import (
     CoordTransform,
-    DxfEntity,
     _cluster_rows,
     _entity_centre,
     _entity_dxf_corners,
@@ -24,6 +23,7 @@ from extract_hitboxes import (
     main,
     parse_args,
 )
+from pipeline_types import DxfEntity
 
 # ─────────────────────────────────────────────────────────────
 # extract_text_entities
@@ -44,13 +44,20 @@ class TestExtractTextEntities:
     def test_entity_has_required_keys(self, minimal_dxf):
         result = extract_text_entities(str(minimal_dxf))
         assert len(result) > 0
-        for key in ("text", "insert", "height", "width_factor", "halign", "valign", "layer", "type"):
+        for key in ("text", "type", "layer", "dxf_bbox"):
             assert key in result[0], f"Missing key: {key}"
 
-    def test_insert_is_float_tuple(self, minimal_dxf):
-        e = extract_text_entities(str(minimal_dxf))[0]
-        assert len(e["insert"]) == 2
-        assert all(isinstance(v, float) for v in e["insert"])
+    def test_entity_has_no_legacy_keys(self, minimal_dxf):
+        result = extract_text_entities(str(minimal_dxf))
+        assert len(result) > 0
+        for key in ("insert", "height", "width_factor", "halign", "valign"):
+            assert key not in result[0], f"Unexpected legacy key present: {key}"
+
+    def test_dxf_bbox_is_4tuple_or_none(self, minimal_dxf):
+        result = extract_text_entities(str(minimal_dxf))
+        for e in result:
+            val = e["dxf_bbox"]
+            assert val is None or (isinstance(val, tuple) and len(val) == 4)
 
     def test_type_field_is_text_for_text_entity(self, minimal_dxf):
         result = extract_text_entities(str(minimal_dxf))
@@ -81,19 +88,6 @@ class TestExtractTextEntities:
         mtext_types = [e["type"] for e in result if e["text"] == "MLABEL"]
         assert mtext_types == ["MTEXT"]
 
-    def test_mtext_halign_valign_are_none(self, tmp_path):
-        import ezdxf
-
-        doc = ezdxf.new(dxfversion="R2010")
-        doc.modelspace().add_mtext("X", dxfattribs={"insert": (0, 0), "char_height": 2.5})
-        dxf_path = tmp_path / "mtext_nohv.dxf"
-        doc.saveas(str(dxf_path))
-
-        result = extract_text_entities(str(dxf_path))
-        mtext = next(e for e in result if e["type"] == "MTEXT")
-        assert mtext["halign"] is None
-        assert mtext["valign"] is None
-
     def test_empty_text_entities_excluded(self, tmp_path):
         import ezdxf
 
@@ -117,32 +111,6 @@ class TestExtractTextEntities:
         doc.saveas(str(dxf_path))
 
         assert extract_text_entities(str(dxf_path)) == []
-
-    def test_width_factor_read_from_dxf(self, tmp_path):
-        import ezdxf
-
-        doc = ezdxf.new(dxfversion="R2010")
-        doc.modelspace().add_text(
-            "FV101", dxfattribs={"insert": (0, 0), "height": 0.94, "width": 0.9}
-        )
-        dxf_path = tmp_path / "wf.dxf"
-        doc.saveas(str(dxf_path))
-
-        result = extract_text_entities(str(dxf_path))
-        entity = next(e for e in result if e["text"] == "FV101")
-        assert entity["width_factor"] == pytest.approx(0.9)
-
-    def test_mtext_width_factor_is_one(self, tmp_path):
-        import ezdxf
-
-        doc = ezdxf.new(dxfversion="R2010")
-        doc.modelspace().add_mtext("MLABEL", dxfattribs={"insert": (0, 0), "char_height": 2.5})
-        dxf_path = tmp_path / "mtext_wf.dxf"
-        doc.saveas(str(dxf_path))
-
-        result = extract_text_entities(str(dxf_path))
-        mtext = next(e for e in result if e["text"] == "MLABEL")
-        assert mtext["width_factor"] == pytest.approx(1.0)
 
     def test_empty_mtext_entities_excluded(self, tmp_path):
         import ezdxf
@@ -254,7 +222,7 @@ class TestCoordTransform:
 
 
 # ─────────────────────────────────────────────────────────────
-# compute_bbox  (helpers shared with later test classes)
+# Shared helpers
 # ─────────────────────────────────────────────────────────────
 
 
@@ -263,20 +231,18 @@ def _make_entity(
     x: float = 0.0,
     y: float = 0.0,
     height: float = 2.5,
-    width_factor: float = 1.0,
-    halign: int | None = 0,
-    valign: int | None = 0,
     etype: str = "TEXT",
+    layer: str = "TEXT",
+    dxf_bbox: tuple[float, float, float, float] | None = None,
 ) -> DxfEntity:
+    """Build a minimal DxfEntity. Synthesises dxf_bbox from position/height when omitted."""
+    if dxf_bbox is None:
+        dxf_bbox = (x, y, x + len(text) * height * 0.6, y + height)
     return {
         "text": text,
-        "insert": (x, y),
-        "height": height,
-        "width_factor": width_factor,
-        "halign": halign,
-        "valign": valign,
-        "layer": "TEXT",
         "type": etype,
+        "layer": layer,
+        "dxf_bbox": dxf_bbox,
     }
 
 
@@ -290,143 +256,85 @@ def _make_tf(minimal_tile_meta) -> CoordTransform:
 
 
 class TestEntityDxfCorners:
-    def test_zero_height_returns_none(self):
-        assert _entity_dxf_corners(_make_entity(height=0.0)) is None
+    def test_none_dxf_bbox_returns_none(self):
+        e: DxfEntity = {"text": "X", "type": "TEXT", "layer": "0", "dxf_bbox": None}
+        assert _entity_dxf_corners(e) is None
 
     def test_returns_four_corners(self):
-        corners = _entity_dxf_corners(_make_entity(height=2.5))
+        corners = _entity_dxf_corners(_make_entity())
         assert corners is not None
         assert len(corners) == 4
 
-    def test_corners_span_text_width_left_aligned(self):
-        # Left-aligned: right edge ≈ insert_x + len * height * 0.6
-        e = _make_entity(text="ABCDE", x=10.0, height=2.0, halign=0)
+    def test_corners_include_padding(self):
+        # bbox (1,2,11,7): bbox height = 5.0, pad = 5.0 * 0.12 = 0.6
+        e = _make_entity(dxf_bbox=(1.0, 2.0, 11.0, 7.0))
         corners = _entity_dxf_corners(e)
         xs = [c[0] for c in corners]
-        expected_w = len("ABCDE") * 2.0 * 0.6  # raw_w without pad
-        assert max(xs) > 10.0 + expected_w * 0.9
+        ys = [c[1] for c in corners]
+        assert min(xs) == pytest.approx(1.0 - 5.0 * 0.12)
+        assert max(xs) == pytest.approx(11.0 + 5.0 * 0.12)
+        assert min(ys) == pytest.approx(2.0 - 5.0 * 0.12)
+        assert max(ys) == pytest.approx(7.0 + 5.0 * 0.12)
 
-    def test_width_factor_scales_bbox_width(self):
-        # width_factor=0.5 should produce a bbox roughly half as wide as width_factor=1.0
-        e_full = _make_entity(text="ABCDE", x=0.0, height=2.0, width_factor=1.0, halign=0)
-        e_half = _make_entity(text="ABCDE", x=0.0, height=2.0, width_factor=0.5, halign=0)
-        corners_full = _entity_dxf_corners(e_full)
-        corners_half = _entity_dxf_corners(e_half)
-        assert corners_full is not None and corners_half is not None
-        w_full = max(c[0] for c in corners_full) - min(c[0] for c in corners_full)
-        w_half = max(c[0] for c in corners_half) - min(c[0] for c in corners_half)
-        assert w_half < w_full * 0.75  # clearly narrower
+    def test_zero_height_bbox_returns_corners(self):
+        # A degenerate bbox (height=0) still returns 4 corners; padding is zero
+        e = _make_entity(dxf_bbox=(5.0, 3.0, 15.0, 3.0))
+        corners = _entity_dxf_corners(e)
+        assert corners is not None
+        assert len(corners) == 4
+
+
+# ─────────────────────────────────────────────────────────────
+# _entity_centre
+# ─────────────────────────────────────────────────────────────
 
 
 class TestEntityCentre:
-    def test_normal_entity_returns_bbox_centre(self):
-        # Left-aligned entity at origin: centre should be to the right of insert
-        e = _make_entity(text="AB", x=0.0, y=0.0, height=2.5, halign=0)
+    def test_returns_bbox_centre(self):
+        e = _make_entity(dxf_bbox=(0.0, 0.0, 10.0, 4.0))
         cx, cy = _entity_centre(e)
-        assert cx > 0.0
+        assert cx == pytest.approx(5.0)
+        assert cy == pytest.approx(2.0)
 
-    def test_zero_height_falls_back_to_insert(self):
-        # height=0 → _entity_dxf_corners returns None → fallback to insert
-        e = _make_entity(x=7.0, y=3.0, height=0.0)
+    def test_none_dxf_bbox_returns_origin(self):
+        e: DxfEntity = {"text": "X", "type": "TEXT", "layer": "0", "dxf_bbox": None}
         cx, cy = _entity_centre(e)
-        assert cx == pytest.approx(7.0)
-        assert cy == pytest.approx(3.0)
+        assert cx == pytest.approx(0.0)
+        assert cy == pytest.approx(0.0)
+
+
+# ─────────────────────────────────────────────────────────────
+# compute_bbox
+# ─────────────────────────────────────────────────────────────
 
 
 class TestComputeBbox:
-    def test_zero_height_returns_none(self, minimal_tile_meta):
+    def test_none_dxf_bbox_returns_none(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
-        assert compute_bbox(_make_entity(height=0.0), tf) is None
+        e: DxfEntity = {"text": "X", "type": "TEXT", "layer": "0", "dxf_bbox": None}
+        assert compute_bbox(e, tf) is None
 
-    def test_returns_dict_with_leaflet_corners(self, minimal_tile_meta):
+    def test_returns_dict_with_corners_key(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
-        result = compute_bbox(_make_entity(height=2.5), tf)
+        result = compute_bbox(_make_entity(), tf)
         assert result is not None
-        assert "leaflet" in result
-        assert "corners" in result["leaflet"]
-        assert len(result["leaflet"]["corners"]) == 4
+        assert "corners" in result
+        assert len(result["corners"]) == 4
 
     def test_each_corner_has_lat_lng(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
-        result = compute_bbox(_make_entity(height=2.5), tf)
-        for corner in result["leaflet"]["corners"]:
+        result = compute_bbox(_make_entity(), tf)
+        assert result is not None
+        for corner in result["corners"]:
             assert "lat" in corner and "lng" in corner
 
-    def test_left_aligned_insert_near_left_edge(self, minimal_tile_meta):
-        # halign=0 (Left): bbox starts just before insert x (pad only to left)
+    def test_corners_span_entity_width(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
-        e = _make_entity(x=100.0, halign=0, height=2.5)
+        e = _make_entity(dxf_bbox=(50.0, 0.0, 60.0, 2.5))
         result = compute_bbox(e, tf)
-        insert_ll = tf.to_leaflet(100.0, 0.0)
-        lngs = [c["lng"] for c in result["leaflet"]["corners"]]
-        assert min(lngs) < insert_ll["lng"]
-
-    def test_center_aligned_straddles_insert(self, minimal_tile_meta):
-        # halign=1 (Center): bbox spans equally left and right of insert
-        tf = _make_tf(minimal_tile_meta)
-        e = _make_entity(x=100.0, halign=1, height=2.5)
-        result = compute_bbox(e, tf)
-        insert_ll = tf.to_leaflet(100.0, 0.0)
-        lngs = [c["lng"] for c in result["leaflet"]["corners"]]
-        assert min(lngs) < insert_ll["lng"] < max(lngs)
-
-    def test_right_aligned_insert_near_right_edge(self, minimal_tile_meta):
-        # halign=2 (Right): right edge ends just after insert x (pad only to right)
-        tf = _make_tf(minimal_tile_meta)
-        e = _make_entity(x=100.0, halign=2, height=2.5)
-        result = compute_bbox(e, tf)
-        insert_ll = tf.to_leaflet(100.0, 0.0)
-        lngs = [c["lng"] for c in result["leaflet"]["corners"]]
-        assert max(lngs) > insert_ll["lng"]
-
-    def test_unknown_halign_defaults_to_left_behaviour(self, minimal_tile_meta):
-        tf = _make_tf(minimal_tile_meta)
-        e_left = _make_entity(halign=0, height=2.5, x=50.0)
-        e_unk = _make_entity(halign=99, height=2.5, x=50.0)
-        r_left = compute_bbox(e_left, tf)
-        r_unk = compute_bbox(e_unk, tf)
-        assert r_left["leaflet"]["corners"] == r_unk["leaflet"]["corners"]
-
-    def test_baseline_valign_insert_inside_bbox(self, minimal_tile_meta):
-        # valign=0 (Baseline): insert y sits inside the bbox (descenders below, cap above)
-        tf = _make_tf(minimal_tile_meta)
-        e = _make_entity(x=0.0, y=50.0, valign=0, height=10.0)
-        result = compute_bbox(e, tf)
-        insert_ll = tf.to_leaflet(0.0, 50.0)
-        lats = [c["lat"] for c in result["leaflet"]["corners"]]
-        assert min(lats) < insert_ll["lat"] < max(lats)
-
-    def test_valign_bottom_insert_at_bottom_of_bbox(self, minimal_tile_meta):
-        # valign=1 (Bottom): insert y is at the bottom of the bbox (box extends upward)
-        tf = _make_tf(minimal_tile_meta)
-        e = _make_entity(valign=1, height=5.0, x=50.0, y=50.0)
-        result = compute_bbox(e, tf)
-        insert_ll = tf.to_leaflet(50.0, 50.0)
-        lats = [c["lat"] for c in result["leaflet"]["corners"]]
-        # In Leaflet (Y-down), insert is near the max (least negative) lat.
-        # Height 5.0 scaled by 2.56 = 12.8 pixels; with padding ~1.6, box height ~14.4
-        assert insert_ll["lat"] >= max(lats) - 16.0
-
-    def test_valign_middle_insert_at_centre_of_bbox(self, minimal_tile_meta):
-        # valign=2 (Middle): insert y is at the vertical centre of the bbox
-        tf = _make_tf(minimal_tile_meta)
-        e = _make_entity(valign=2, height=5.0, x=50.0, y=50.0)
-        result = compute_bbox(e, tf)
-        insert_ll = tf.to_leaflet(50.0, 50.0)
-        lats = [c["lat"] for c in result["leaflet"]["corners"]]
-        bbox_centre_lat = (min(lats) + max(lats)) / 2
-        assert abs(insert_ll["lat"] - bbox_centre_lat) < 0.5  # insert near vertical centre
-
-    def test_valign_top_insert_at_top_of_bbox(self, minimal_tile_meta):
-        # valign=3 (Top): insert y is at the top of the bbox (box extends downward)
-        tf = _make_tf(minimal_tile_meta)
-        e = _make_entity(valign=3, height=5.0, x=50.0, y=50.0)
-        result = compute_bbox(e, tf)
-        insert_ll = tf.to_leaflet(50.0, 50.0)
-        lats = [c["lat"] for c in result["leaflet"]["corners"]]
-        # In Leaflet (Y-down), insert is near the min (most negative) lat.
-        # Height 5.0 scaled by 2.56 = 12.8 pixels; with padding ~1.6, box height ~14.4
-        assert insert_ll["lat"] <= min(lats) + 16.0
+        assert result is not None
+        lngs = [c["lng"] for c in result["corners"]]
+        assert max(lngs) > min(lngs)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -478,7 +386,6 @@ class TestBuildClusters:
         assert build_clusters([]) == []
 
     def test_single_entity_no_cluster(self):
-        # Clusters require ≥2 members
         assert build_clusters([_make_entity("FV101")]) == []
 
     def test_nearby_vertical_entities_cluster(self):
@@ -488,13 +395,12 @@ class TestBuildClusters:
         assert len(clusters[0]) == 2
 
     def test_distant_entities_no_cluster(self):
-        # Separate by 10 × height — far outside default gap_factor=3.5
+        # Separate by ~10 × height — far outside default gap_factor=3.5
         top = _make_entity("FV", x=10.0, y=50.0, height=2.5)
         bot = _make_entity("501", x=10.0, y=25.0, height=2.5)
         assert build_clusters([top, bot]) == []
 
     def test_cluster_reading_order_top_first(self):
-        # Higher Y entity (top of page) must come first in returned cluster
         top, bot = _nearby_pair()
         clusters = build_clusters([bot, top])  # supply in reversed order
         assert clusters[0][0]["text"] == "FV"  # top entity first
@@ -523,9 +429,8 @@ class TestBuildClusterIndex:
         assert "FV 501" in idx
 
     def test_inverted_t_variants(self):
-        # "FV" on top, "12" and "54" side-by-side below
         top = _make_entity("FV", x=10.0, y=50.0, height=2.5)
-        b1 = _make_entity("12", x=7.0, y=46.25, height=2.5)  # y = 50 - 1.5*2.5
+        b1 = _make_entity("12", x=7.0, y=46.25, height=2.5)
         b2 = _make_entity("54", x=13.0, y=46.25, height=2.5)
         idx = build_cluster_index([top, b1, b2])
         assert "FV12" in idx
@@ -536,10 +441,9 @@ class TestBuildClusterIndex:
     def test_case_insensitive_key(self):
         entities = self._pair("fv", "501")
         idx = build_cluster_index(entities)
-        assert "FV501" in idx  # upper-case key must also be present
+        assert "FV501" in idx
 
     def test_isolated_entities_not_indexed(self):
-        # Two entities far apart → no cluster → empty index
         e1 = _make_entity("AA", x=0.0, y=0.0, height=2.5)
         e2 = _make_entity("BB", x=100.0, y=50.0, height=2.5)
         assert build_cluster_index([e1, e2]) == {}
@@ -572,14 +476,12 @@ class TestInvertedTVariants:
         assert "FV54" in variants
 
     def test_single_row_cluster_returns_empty(self):
-        # All same Y → _cluster_rows returns None → guard branch (line 320)
         e1 = _make_entity("FV", x=5.0, y=50.0, height=2.5)
         e2 = _make_entity("501", x=15.0, y=50.0, height=2.5)
         e3 = _make_entity("XYZ", x=25.0, y=50.0, height=2.5)
         assert _inverted_t_variants([e1, e2, e3]) == set()
 
     def test_two_top_one_bottom_returns_empty(self):
-        # Two top tokens, one bottom → not inverted-T → guard branch (line 323)
         t1 = _make_entity("FV", x=5.0, y=50.0, height=2.5)
         t2 = _make_entity("HV", x=15.0, y=50.0, height=2.5)
         bot = _make_entity("501", x=10.0, y=46.25, height=2.5)
@@ -608,27 +510,20 @@ class TestBuildHitboxes:
         tf = _make_tf(minimal_tile_meta)
         assert build_hitboxes(["MISSING"], {}, tf) == []
 
-    def test_leaflet_coords_present_with_transform(self, minimal_tile_meta):
-        tf = _make_tf(minimal_tile_meta)
-        idx = build_index([_make_entity("FV101", x=50.0, y=50.0, height=2.5)])
-        result = build_hitboxes(["FV101"], idx, tf)
-        ll = result[0]["leaflet"]
-        assert ll is not None
-        assert "lat" in ll and "lng" in ll
-
-    def test_bbox_present_with_transform(self, minimal_tile_meta):
+    def test_bbox_present_with_corners(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
         idx = build_index([_make_entity("FV101", x=50.0, y=50.0, height=2.5)])
         result = build_hitboxes(["FV101"], idx, tf)
         bbox = result[0]["bbox"]
         assert bbox is not None
-        assert len(bbox["leaflet"]["corners"]) == 4
+        assert "corners" in bbox
+        assert len(bbox["corners"]) == 4
 
     def test_hitbox_record_has_exactly_required_keys(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
         idx = build_index([_make_entity("FV101", x=50.0, y=50.0, height=2.5)])
         record = build_hitboxes(["FV101"], idx, tf)[0]
-        assert set(record.keys()) == {"label", "found", "clustered", "leaflet", "bbox"}
+        assert set(record.keys()) == {"label", "found", "clustered", "bbox"}
 
     def test_mixed_found_and_not_found(self, minimal_tile_meta):
         tf = _make_tf(minimal_tile_meta)
@@ -675,12 +570,12 @@ class TestBuildHitboxes:
         result = build_hitboxes(["FV501"], {}, tf, cluster_index=ci)
         bbox = result[0]["bbox"]
         assert bbox is not None
-        lats = [c["lat"] for c in bbox["leaflet"]["corners"]]
-        # Merged bbox must span a larger area than either individual entity
+        lats = [c["lat"] for c in bbox["corners"]]
         top_bbox = compute_bbox(top, tf)
         bot_bbox = compute_bbox(bot, tf)
-        top_lats = [c["lat"] for c in top_bbox["leaflet"]["corners"]]
-        bot_lats = [c["lat"] for c in bot_bbox["leaflet"]["corners"]]
+        assert top_bbox is not None and bot_bbox is not None
+        top_lats = [c["lat"] for c in top_bbox["corners"]]
+        bot_lats = [c["lat"] for c in bot_bbox["corners"]]
         assert min(lats) <= min(top_lats + bot_lats)
         assert max(lats) >= max(top_lats + bot_lats)
 
@@ -739,14 +634,10 @@ class TestParseArgs:
     def test_optional_args(self):
         args = parse_args(
             [
-                "--dxf",
-                "a.dxf",
-                "--labels",
-                "b.txt",
-                "--tile-meta",
-                "meta.json",
-                "--out",
-                "out/hb.json",
+                "--dxf", "a.dxf",
+                "--labels", "b.txt",
+                "--tile-meta", "meta.json",
+                "--out", "out/hb.json",
                 "--verbose",
             ]
         )
@@ -756,31 +647,15 @@ class TestParseArgs:
 
     def test_cluster_gap_arg(self):
         args = parse_args(
-            [
-                "--dxf",
-                "a.dxf",
-                "--labels",
-                "b.txt",
-                "--tile-meta",
-                "meta.json",
-                "--cluster-gap",
-                "5.0",
-            ]
+            ["--dxf", "a.dxf", "--labels", "b.txt", "--tile-meta", "meta.json",
+             "--cluster-gap", "5.0"]
         )
         assert args.cluster_gap == pytest.approx(5.0)
 
     def test_h_tolerance_arg(self):
         args = parse_args(
-            [
-                "--dxf",
-                "a.dxf",
-                "--labels",
-                "b.txt",
-                "--tile-meta",
-                "meta.json",
-                "--h-tolerance",
-                "1.0",
-            ]
+            ["--dxf", "a.dxf", "--labels", "b.txt", "--tile-meta", "meta.json",
+             "--h-tolerance", "1.0"]
         )
         assert args.h_tolerance == pytest.approx(1.0)
 
@@ -808,14 +683,10 @@ class TestMain:
 
         main(
             [
-                "--dxf",
-                str(minimal_dxf),
-                "--labels",
-                str(labels_path),
-                "--tile-meta",
-                str(meta_path),
-                "--out",
-                str(out_path),
+                "--dxf", str(minimal_dxf),
+                "--labels", str(labels_path),
+                "--tile-meta", str(meta_path),
+                "--out", str(out_path),
             ]
         )
 
@@ -824,8 +695,28 @@ class TestMain:
         assert "FV101" in labels_out
         assert "HV201" in labels_out
         assert "MISSING" not in labels_out
-        assert data[0]["leaflet"] is not None
         assert data[0]["bbox"] is not None
+
+    def test_output_record_has_no_leaflet_key(self, minimal_dxf, tmp_path, minimal_tile_meta):
+        labels_path = tmp_path / "labels.txt"
+        labels_path.write_text("FV101\n", encoding="utf-8")
+        meta_path = tmp_path / "tile_meta.json"
+        meta_path.write_text(json.dumps(minimal_tile_meta), encoding="utf-8")
+        out_path = tmp_path / "hitboxes.json"
+
+        main(
+            [
+                "--dxf", str(minimal_dxf),
+                "--labels", str(labels_path),
+                "--tile-meta", str(meta_path),
+                "--out", str(out_path),
+            ]
+        )
+
+        data = json.loads(out_path.read_text())
+        assert len(data) == 1
+        assert "leaflet" not in data[0]
+        assert "corners" in data[0]["bbox"]
 
     def test_creates_output_directory(self, minimal_dxf, tmp_path, minimal_tile_meta):
         labels_path = tmp_path / "labels.txt"
@@ -836,14 +727,10 @@ class TestMain:
 
         main(
             [
-                "--dxf",
-                str(minimal_dxf),
-                "--labels",
-                str(labels_path),
-                "--tile-meta",
-                str(meta_path),
-                "--out",
-                str(out_path),
+                "--dxf", str(minimal_dxf),
+                "--labels", str(labels_path),
+                "--tile-meta", str(meta_path),
+                "--out", str(out_path),
             ]
         )
 
@@ -858,14 +745,10 @@ class TestMain:
 
         main(
             [
-                "--dxf",
-                str(minimal_dxf),
-                "--labels",
-                str(labels_path),
-                "--tile-meta",
-                str(meta_path),
-                "--out",
-                str(out_path),
+                "--dxf", str(minimal_dxf),
+                "--labels", str(labels_path),
+                "--tile-meta", str(meta_path),
+                "--out", str(out_path),
                 "--verbose",
             ]
         )
@@ -874,12 +757,10 @@ class TestMain:
     def test_cluster_labels_resolved(self, tmp_path, minimal_tile_meta):
         import ezdxf
 
-        # Build a DXF where "FV" sits above "101" (close enough to cluster)
         doc = ezdxf.new(dxfversion="R2010")
         msp = doc.modelspace()
         msp.add_text("FV", dxfattribs={"insert": (10.0, 25.0), "height": 2.5})
         msp.add_text("101", dxfattribs={"insert": (10.0, 20.0), "height": 2.5})
-        # Add a polyline so get_dxf_extents doesn't fail on empty geometry
         msp.add_lwpolyline([(0, 0), (50, 0), (50, 50), (0, 50)], dxfattribs={"closed": True})
         dxf_path = tmp_path / "cluster.dxf"
         doc.saveas(str(dxf_path))
@@ -892,14 +773,10 @@ class TestMain:
 
         main(
             [
-                "--dxf",
-                str(dxf_path),
-                "--labels",
-                str(labels_path),
-                "--tile-meta",
-                str(meta_path),
-                "--out",
-                str(out_path),
+                "--dxf", str(dxf_path),
+                "--labels", str(labels_path),
+                "--tile-meta", str(meta_path),
+                "--out", str(out_path),
             ]
         )
 
